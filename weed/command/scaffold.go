@@ -189,6 +189,9 @@ sniff_enabled = false
 healthcheck_enabled = false
 # increase the value is recommend, be sure the value in Elastic is greater or equal here
 index.max_result_window = 10000
+
+[hbase]
+host = "localhost"
 `
 
 	NOTIFICATION_TOML_EXAMPLE = `

@@ -3,6 +3,7 @@ package hbase
 import (
 	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/tsuna/gohbase/hrpc"
 )
 
@@ -29,6 +30,9 @@ func (store *HbaseStore) KvGet(ctx context.Context, key []byte) (value []byte, e
 	getResp, err := store.client.Get(getRequest)
 	if err != nil {
 		return nil, fmt.Errorf("get key %s error : %v", string(key), err)
+	}
+	if len(getResp.Cells) == 0 {
+		return nil, filer.ErrKvNotFound
 	}
 	return getResp.Cells[0].Value, nil
 }

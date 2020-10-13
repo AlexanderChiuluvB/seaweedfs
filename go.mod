@@ -13,6 +13,7 @@ require (
 	github.com/cespare/xxhash v1.1.0
 	github.com/chrislusf/raft v1.0.2-0.20201002174524-b13c3bfdb011
 	github.com/coreos/go-semver v0.3.0 // indirect
+	github.com/dgraph-io/badger/v2 v2.2007.2 // indirect
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/disintegration/imaging v1.6.2
 	github.com/dustin/go-humanize v1.0.0
@@ -70,7 +71,7 @@ require (
 	github.com/syndtr/goleveldb v1.0.0
 	github.com/tidwall/gjson v1.3.2
 	github.com/tidwall/match v1.0.1
-	github.com/tsuna/gohbase v0.0.0-20201006203713-f1ffe9f66b83 // indirect
+	github.com/tsuna/gohbase v0.0.0-20201006203713-f1ffe9f66b83
 	github.com/willf/bitset v1.1.10 // indirect
 	github.com/willf/bloom v2.0.3+incompatible
 	github.com/wsxiaoys/terminal v0.0.0-20160513160801-0940f3fc43a0 // indirect
