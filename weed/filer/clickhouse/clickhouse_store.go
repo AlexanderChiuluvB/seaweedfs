@@ -2,15 +2,13 @@ package clickhouse
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"github.com/ClickHouse/clickhouse-go"
 	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	weed_util "github.com/chrislusf/seaweedfs/weed/util"
-	"github.com/ClickHouse/clickhouse-go"
-	"database/sql"
-	"github.com/syndtr/goleveldb/leveldb"
-	leveldb_errors "github.com/syndtr/goleveldb/leveldb/errors"
-	"github.com/syndtr/goleveldb/leveldb/opt"
+	"time"
 )
 
 const (
@@ -30,7 +28,7 @@ func (store *ClickHouseStore) GetName() string {
 }
 
 func (store *ClickHouseStore) Initialize(configuration weed_util.Configuration, prefix string) (err error) {
-	dataSource := configuration.GetString(prefix + "dataSource")
+	dataSource := configuration.GetString(prefix + "url")
 	return store.initialize(dataSource)
 }
 
@@ -48,7 +46,19 @@ func (store *ClickHouseStore) initialize(dataSource string) (err error) {
 		}
 	}
 	//create table
-
+	//TODO: Use bloom filter to speed up 'like' expression
+	if _, err = store.db.Exec(`
+		CREATE TABLE IF NOT EXISTS filemeta (
+			filename String,
+			directory String,
+			meta String,
+			datetime DateTime
+		) engine=ReplacingMergeTree(DateTime) 
+		PARTITION BY toYYYYMM(datetime)
+		ORDER BY (directory, filename)
+	`); err != nil {
+		glog.Infof("Clickhouse create filemeta failed, err = %v", err)
+	}
 
 	return
 }
@@ -64,63 +74,77 @@ func (store *ClickHouseStore) RollbackTransaction(ctx context.Context) error {
 }
 
 func (store *ClickHouseStore) InsertEntry(ctx context.Context, entry *filer.Entry) (err error) {
-	key := genKey(entry.DirAndName())
-
-	value, err := entry.EncodeAttributesAndChunks()
+	dir, name := entry.FullPath.DirAndName()
+	meta, err := entry.EncodeAttributesAndChunks()
 	if err != nil {
-		return fmt.Errorf("encoding %s %+v: %v", entry.FullPath, entry.Attr, err)
+		return fmt.Errorf("encode %s: %s", entry.FullPath, err)
 	}
 
 	if len(entry.Chunks) > 50 {
-		value = weed_util.MaybeGzipData(value)
+		meta = weed_util.MaybeGzipData(meta)
 	}
 
-	err = store.db.Put(key, value, nil)
-
+	tx, err := store.db.Begin()
 	if err != nil {
-		return fmt.Errorf("persisting %s : %v", entry.FullPath, err)
+		return fmt.Errorf("InsertEntry: begin transaction error %v", err)
+	}
+	stmt, err := tx.Prepare("INSERT INTO filemeta (directory,filename,meta, datetime) VALUES(?,?,?,?)")
+	if err != nil {
+		return fmt.Errorf("InsertEntry error: %s", err)
+	}
+	defer stmt.Close()
+
+	if _, err := stmt.Exec(dir, name, meta, time.Now().Format("2006-01-02 15:04:05")); err != nil {
+		return fmt.Errorf("InsertEntry error: %s", err)
 	}
 
-	// println("saved", entry.FullPath, "chunks", len(entry.Chunks))
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("InsertEntry: transaction commit error %s", err)
+	}
 
 	return nil
 }
 
 func (store *ClickHouseStore) UpdateEntry(ctx context.Context, entry *filer.Entry) (err error) {
-
 	return store.InsertEntry(ctx, entry)
 }
 
 func (store *ClickHouseStore) FindEntry(ctx context.Context, fullpath weed_util.FullPath) (entry *filer.Entry, err error) {
-	key := genKey(fullpath.DirAndName())
+	dir, name := fullpath.DirAndName()
+	var data []byte
 
-	data, err := store.db.Get(key, nil)
-
-	if err == leveldb.ErrNotFound {
-		return nil, filer_pb.ErrNotFound
-	}
+	rows, err := store.db.Query("SELECT meta FROM filemeta WHERE directory=? AND filename=?", dir, name)
 	if err != nil {
-		return nil, fmt.Errorf("get %s : %v", entry.FullPath, err)
+		return nil, fmt.Errorf("Select meta from filemeta where directory = %s and name = %s err : %v",
+			dir, name, err)
+	}
+	defer rows.Close()
+	var found bool
+	for rows.Next() {
+		found = true
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("entry with path %s not found", fullpath)
 	}
 
+	glog.Infof("find entry with directory %s and name %s!", dir, name)
 	entry = &filer.Entry{
 		FullPath: fullpath,
 	}
-	err = entry.DecodeAttributesAndChunks(weed_util.MaybeDecompressData((data)))
-	if err != nil {
+	if err = entry.DecodeAttributesAndChunks(weed_util.MaybeDecompressData(data)); err != nil {
 		return entry, fmt.Errorf("decode %s : %v", entry.FullPath, err)
 	}
-
-	// println("read", entry.FullPath, "chunks", len(entry.Chunks), "data", len(data), string(data))
-
 	return entry, nil
 }
 
 func (store *ClickHouseStore) DeleteEntry(ctx context.Context, fullpath weed_util.FullPath) (err error) {
-	key := genKey(fullpath.DirAndName())
-
-	err = store.db.Delete(key, nil)
-	if err != nil {
+	dir, name := fullpath.DirAndName()
+	if _, err := store.db.Exec(
+		"ALTER TABLE filemeta DELETE WHERE directory=? AND filename=?",
+		dir, name); err != nil {
 		return fmt.Errorf("delete %s : %v", fullpath, err)
 	}
 
@@ -128,102 +152,79 @@ func (store *ClickHouseStore) DeleteEntry(ctx context.Context, fullpath weed_uti
 }
 
 func (store *ClickHouseStore) DeleteFolderChildren(ctx context.Context, fullpath weed_util.FullPath) (err error) {
-
-	batch := new(leveldb.Batch)
-
-	directoryPrefix := genDirectoryKeyPrefix(fullpath, "")
-	iter := store.db.NewIterator(&leveldb_util.Range{Start: directoryPrefix}, nil)
-	for iter.Next() {
-		key := iter.Key()
-		if !bytes.HasPrefix(key, directoryPrefix) {
-			break
-		}
-		fileName := getNameFromKey(key)
-		if fileName == "" {
-			continue
-		}
-		batch.Delete([]byte(genKey(string(fullpath), fileName)))
-	}
-	iter.Release()
-
-	err = store.db.Write(batch, nil)
-
-	if err != nil {
+	if _, err := store.db.Exec(
+		"ALTER TABLE filemeta DELETE WHERE directory=?", fullpath); err != nil {
 		return fmt.Errorf("delete %s : %v", fullpath, err)
 	}
-
 	return nil
 }
 
 func (store *ClickHouseStore) ListDirectoryPrefixedEntries(ctx context.Context, fullpath weed_util.FullPath, startFileName string, inclusive bool, limit int, prefix string) (entries []*filer.Entry, err error) {
-	return nil, filer.ErrUnsupportedListDirectoryPrefixed
+	//TODO prefix function not implemented use like 'prefix' grammar
+	sqlStr := "SELECT filename, meta FROM filemeta WHERE directory=? AND filename>? ORDER BY filename ASC LIMIT ?"
+	if inclusive {
+		sqlStr = "SELECT filename, meta FROM filemeta WHERE directory=? AND filename>=? ORDER BY filename ASC LIMIT ?"
+	}
+
+	rows, err := store.db.Query(sqlStr, string(fullpath), startFileName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select query error :%v", err)
+	}
+
+	for rows.Next() {
+		var (
+			meta []byte
+			filename string
+		)
+		if err := rows.Scan(&filename, &meta); err != nil {
+			return nil, fmt.Errorf("list %s : %v", string(fullpath), err)
+		}
+		entry := &filer.Entry{
+			FullPath: weed_util.NewFullPath(string(fullpath), filename),
+		}
+		if decodeErr := entry.DecodeAttributesAndChunks(weed_util.MaybeDecompressData(meta)); decodeErr != nil {
+			glog.V(0).Infof("list %s : %v", entry.FullPath, decodeErr)
+			break
+		}
+		entries = append(entries, entry)
+	}
+	return entries, err
 }
 
 func (store *ClickHouseStore) ListDirectoryEntries(ctx context.Context, fullpath weed_util.FullPath, startFileName string, inclusive bool,
 	limit int) (entries []*filer.Entry, err error) {
 
-	directoryPrefix := genDirectoryKeyPrefix(fullpath, "")
-
-	iter := store.db.NewIterator(&leveldb_util.Range{Start: genDirectoryKeyPrefix(fullpath, startFileName)}, nil)
-	for iter.Next() {
-		key := iter.Key()
-		if !bytes.HasPrefix(key, directoryPrefix) {
-			break
-		}
-		fileName := getNameFromKey(key)
-		if fileName == "" {
-			continue
-		}
-		if fileName == startFileName && !inclusive {
-			continue
-		}
-		limit--
-		if limit < 0 {
-			break
-		}
-		entry := &filer.Entry{
-			FullPath: weed_util.NewFullPath(string(fullpath), fileName),
-		}
-		if decodeErr := entry.DecodeAttributesAndChunks(weed_util.MaybeDecompressData(iter.Value())); decodeErr != nil {
-			err = decodeErr
-			glog.V(0).Infof("list %s : %v", entry.FullPath, err)
-			break
-		}
-		entries = append(entries, entry)
+	sqlStr := "SELECT filename, meta FROM filemeta WHERE directory=? AND filename>? ORDER BY filename ASC LIMIT ?"
+	if inclusive {
+		sqlStr = "SELECT filename, meta FROM filemeta WHERE directory=? AND filename>=? ORDER BY filename ASC LIMIT ?"
 	}
-	iter.Release()
 
+	rows, err := store.db.Query(sqlStr, string(fullpath), startFileName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select query error :%v", err)
+	}
+
+	for rows.Next() {
+		var (
+			meta []byte
+			filename string
+		)
+		if err := rows.Scan(&filename, &meta); err != nil {
+			entry := &filer.Entry{
+				FullPath: weed_util.NewFullPath(string(fullpath), filename),
+			}
+			if decodeErr := entry.DecodeAttributesAndChunks(weed_util.MaybeDecompressData(meta)); decodeErr != nil {
+				glog.V(0).Infof("list %s : %v", entry.FullPath, decodeErr)
+				break
+			}
+			entries = append(entries, entry)
+		}
+	}
 	return entries, err
 }
 
-func genKey(dirPath, fileName string) (key []byte) {
-	key = []byte(dirPath)
-	key = append(key, DIR_FILE_SEPARATOR)
-	key = append(key, []byte(fileName)...)
-	return key
-}
-
-func genDirectoryKeyPrefix(fullpath weed_util.FullPath, startFileName string) (keyPrefix []byte) {
-	keyPrefix = []byte(string(fullpath))
-	keyPrefix = append(keyPrefix, DIR_FILE_SEPARATOR)
-	if len(startFileName) > 0 {
-		keyPrefix = append(keyPrefix, []byte(startFileName)...)
-	}
-	return keyPrefix
-}
-
-func getNameFromKey(key []byte) string {
-
-	sepIndex := len(key) - 1
-	for sepIndex >= 0 && key[sepIndex] != DIR_FILE_SEPARATOR {
-		sepIndex--
-	}
-
-	return string(key[sepIndex+1:])
-
-}
-
 func (store *ClickHouseStore) Shutdown() {
+	//store.db.Exec("drop table filemeta")
 	store.db.Close()
 }
 

@@ -13,9 +13,6 @@ import (
 type HardLinkId []byte
 
 func (f *Filer) DeleteEntryMetaAndData(ctx context.Context, p util.FullPath, isRecursive, ignoreRecursiveError, shouldDeleteChunks, isFromOtherCluster bool, signatures []int32) (err error) {
-	if p == "/" {
-		return nil
-	}
 
 	entry, findErr := f.FindEntry(ctx, p)
 	if findErr != nil {

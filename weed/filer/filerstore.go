@@ -115,7 +115,7 @@ func (fsw *FilerStoreWrapper) FindEntry(ctx context.Context, fp util.FullPath) (
 
 	entry, err = fsw.ActualStore.FindEntry(ctx, fp)
 	if err != nil {
-		return nil, err
+		return nil, filer_pb.ErrNotFound
 	}
 
 	fsw.maybeReadHardLink(ctx, entry)

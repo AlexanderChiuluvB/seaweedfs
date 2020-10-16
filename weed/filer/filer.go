@@ -80,7 +80,7 @@ func (f *Filer) AggregateFromPeers(self string, filers []string) {
 func (f *Filer) SetStore(store FilerStore) {
 	f.Store = NewFilerStoreWrapper(store)
 
-	f.setOrLoadFilerStoreSignature(store)
+	//f.setOrLoadFilerStoreSignature(store)
 
 }
 
@@ -214,7 +214,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFr
 		}
 	} else {
 		if o_excl {
-			glog.V(3).Infof("EEXIST: entry %s already exists", entry.FullPath)
+			glog.V(3).Infof("EXIST: entry %s already exists", entry.FullPath)
 			return fmt.Errorf("EEXIST: entry %s already exists", entry.FullPath)
 		}
 		if err := f.UpdateEntry(ctx, oldEntry, entry); err != nil {
