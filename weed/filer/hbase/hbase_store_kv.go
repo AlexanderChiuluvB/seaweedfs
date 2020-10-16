@@ -25,11 +25,11 @@ func (store *HbaseStore) KvGet(ctx context.Context, key []byte) (value []byte, e
 	families := map[string][]string{"cf": nil}
 	getRequest, err := hrpc.NewGetStr(ctx, "filemeta", string(key), hrpc.Families(families))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Get request: %s", err)
+		return nil, filer.ErrKvNotFound
 	}
 	getResp, err := store.client.Get(getRequest)
 	if err != nil {
-		return nil, fmt.Errorf("get key %s error : %v", string(key), err)
+		return nil, filer.ErrKvNotFound
 	}
 	if len(getResp.Cells) == 0 {
 		return nil, filer.ErrKvNotFound
